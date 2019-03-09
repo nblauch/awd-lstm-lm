@@ -4,17 +4,21 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import os
 
 import data
 import model
 
-from utils import batchify, get_batch, repackage_hidden
+from utils import batchify, get_batch, repackage_hidden, get_name
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='data/penn/',
                     help='location of the data corpus')
 parser.add_argument('--model', type=str, default='LSTM',
                     help='type of recurrent net (LSTM, QRNN, GRU)')
+parser.add_argument('--loss', type=str, default='splitcrossentropy',
+                    help='Loss type (crossentropy, focal)')
+parser.add_argument('--gamma', type=float, default=0)
 parser.add_argument('--emsize', type=int, default=400,
                     help='size of word embeddings')
 parser.add_argument('--nhid', type=int, default=1150,
@@ -45,13 +49,12 @@ parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--nonmono', type=int, default=5,
                     help='random seed')
-parser.add_argument('--cuda', action='store_false',
+parser.add_argument('--cuda', action='store_true',
                     help='use CUDA')
 parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
-randomhash = ''.join(str(time.time()).split('.'))
-parser.add_argument('--save', type=str,  default=randomhash+'.pt',
-                    help='path to save the final model')
+parser.add_argument('--no-save', action='store_true',
+                    help='Use to not save (by default generates filename based on params)')
 parser.add_argument('--alpha', type=float, default=2,
                     help='alpha L2 regularization on RNN activation (alpha = 0 means no regularization)')
 parser.add_argument('--beta', type=float, default=1,
@@ -65,7 +68,10 @@ parser.add_argument('--optimizer', type=str,  default='sgd',
 parser.add_argument('--when', nargs="+", type=int, default=[-1],
                     help='When (which epochs) to divide the learning rate by 10 - accepts multiple')
 args = parser.parse_args()
+args.dataset = os.path.basename(args.data)
 args.tied = True
+
+fn_exclude_keys=['resume', 'data'] # will add to this below as necessary, for fn generation
 
 # Set the random seed manually for reproducibility.
 np.random.seed(args.seed)
@@ -111,6 +117,7 @@ test_data = batchify(corpus.test, test_batch_size, args)
 ###############################################################################
 
 from splitcross import SplitCrossEntropyLoss
+from focalloss import FocalLoss
 criterion = None
 
 ntokens = len(corpus.dictionary)
@@ -138,7 +145,12 @@ if not criterion:
         # WikiText-103
         splits = [2800, 20000, 76000]
     print('Using', splits)
-    criterion = SplitCrossEntropyLoss(args.emsize, splits=splits, verbose=False)
+    if args.loss == 'splitcrossentropy':
+        criterion = SplitCrossEntropyLoss(args.emsize, splits=splits, verbose=False)
+        fn_exclude_keys += ['gamma']
+    elif args.loss == 'focal':
+        criterion = FocalLoss(args.gamma)
+        fn_exclude_keys += ['emsize']
 ###
 if args.cuda:
     model = model.cuda()
@@ -148,6 +160,9 @@ params = list(model.parameters()) + list(criterion.parameters())
 total_params = sum(x.size()[0] * x.size()[1] if len(x.size()) > 1 else x.size()[0] for x in params if x.size())
 print('Args:', args)
 print('Model total parameters:', total_params)
+
+## get filename
+fn = 'save/' + get_name(args.__dict__, exclude_keys=fn_exclude_keys, vals_only=True, no_datetime=True, ext='.pt')
 
 ###############################################################################
 # Training code
@@ -163,7 +178,11 @@ def evaluate(data_source, batch_size=10):
     for i in range(0, data_source.size(0) - 1, args.bptt):
         data, targets = get_batch(data_source, i, args, evaluation=True)
         output, hidden = model(data, hidden)
-        total_loss += len(data) * criterion(model.decoder.weight, model.decoder.bias, output, targets).data
+        input = torch.mm(model.decoder.weight, output.transpose(0,1)).transpose(0,1) + model.decoder.bias
+        if args.loss == 'splitcrossentropy':
+            total_loss += len(data) * criterion(model.decoder.weight, model.decoder.bias, output, targets).data
+        elif args.loss == 'focal':
+            total_loss += len(data) * criterion(input, targets, test=True).data
         hidden = repackage_hidden(hidden)
     return total_loss.item() / len(data_source)
 
@@ -194,7 +213,11 @@ def train():
         optimizer.zero_grad()
 
         output, hidden, rnn_hs, dropped_rnn_hs = model(data, hidden, return_h=True)
-        raw_loss = criterion(model.decoder.weight, model.decoder.bias, output, targets)
+        input = torch.mm(model.decoder.weight, output.transpose(0,1)).transpose(0,1) + model.decoder.bias
+        if args.loss == 'splitcrossentropy':
+            raw_loss = criterion(model.decoder.weight, model.decoder.bias, output, targets)
+        else:
+            raw_loss = criterion(input, targets)
 
         loss = raw_loss
         # Activiation Regularization
@@ -252,7 +275,7 @@ try:
             print('-' * 89)
 
             if val_loss2 < stored_loss:
-                model_save(args.save)
+                model_save(fn)
                 print('Saving Averaged!')
                 stored_loss = val_loss2
 
@@ -268,7 +291,7 @@ try:
             print('-' * 89)
 
             if val_loss < stored_loss:
-                model_save(args.save)
+                model_save(fn)
                 print('Saving model (new best validation)')
                 stored_loss = val_loss
 

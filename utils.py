@@ -27,3 +27,27 @@ def get_batch(source, i, args, seq_len=None, evaluation=False):
     data = source[i:i+seq_len]
     target = source[i+1:i+1+seq_len].view(-1)
     return data, target
+
+def get_name(opts, exclude_keys=[], vals_only=False, no_datetime=False, ext='.pkl'):
+    """
+    Get a file-name based on a dictionary, set of dict keys to exclude from the name,
+    whether to add the datetime string, and what extension, if any
+    """
+    name = None
+    if not no_datetime:
+        name = str(datetime.now()).replace(' ', '-').split('.')[0]
+    for key in sorted(opts):
+        if key not in exclude_keys:
+            if vals_only:
+                if name is None:
+                    name = str(opts[key])
+                else:
+                    name = '_'.join((name, str(opts[key])))
+            else:
+                if name is None:
+                    name = '-'.join((key, str(opts[key])))
+                else:
+                    name = '_'.join((name, '-'.join((key, str(opts[key])))))
+    if ext is not None:
+        name += ext
+    return name
